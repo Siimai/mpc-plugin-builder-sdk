@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plugin panel</title>
+<style>
+  :root { --bg:#101012; --fg:#e0d4d4; --dim:#7a6a70; --acc:#d62834; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px "Titillium Web", system-ui, sans-serif; user-select:none; -webkit-user-select:none; }
+  header { display:flex; gap:12px; align-items:center; padding:8px 14px; border-bottom:1px solid #2a2226; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 8px 0 0; }
+  header .sub { color:var(--dim); font-size:12px; }
+  select, button.tab { background:#1c171a; color:var(--fg); border:1px solid #3a2e33; border-radius:6px; padding:6px 10px; font:inherit; }
+  button.tab { cursor:pointer; min-width:84px; }
+  button.tab.on { background:var(--acc); border-color:var(--acc); color:#140c0e; font-weight:600; }
+  #tabs { display:flex; gap:6px; }
+  #status { margin-left:auto; color:var(--dim); font-size:12px; }
+  #status.err { color:var(--acc); }
+  #wrap { padding:12px; overflow:hidden; }
+  #stage { position:relative; transform-origin:0 0; background:#161617; overflow:hidden; }
+  .c { position:absolute; }
+  .c img { display:block; pointer-events:none; }
+  .lbl { white-space:nowrap; pointer-events:none; line-height:1; display:flex; }
+  .sel { cursor:ew-resize; }
+  .btn, .kn, .fd, .xy { cursor:pointer; touch-action:none; }
+  #generic { max-width:760px; margin:0 auto; display:grid; grid-template-columns: 180px 1fr 120px; gap:6px 12px; align-items:center; }
+  #generic input[type=range] { width:100%; }
+  #generic .d { color:var(--dim); text-align:right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Plugin panel</h1>
+  <select id="prog" title="Program"></select>
+  <div id="tabs"></div>
+  <span id="status">connecting…</span>
+</header>
+<div id="wrap"><div id="stage"></div><div id="generic" hidden></div></div>
+
+<script>
+"use strict";
+// Draws Plugin Skins/TUI.json (the format the MPC reads) and talks to the plugin through /api/*.
+// Dev-only tool: see framework/mpc_desktop_panel.h.
+const $ = (id) => document.getElementById(id);
+const stage = $("stage");
+let P = [];            // static parameter info [{name, unit, def, choices}]
+let V = [];            // current normalised values
+let D = [];            // current display strings
+let skin = null;
+let activeTab = 0;
+let bindings = [];     // {params:[idx...], update()}
+const dragging = new Set();   // parameter indices being dragged (not overwritten by polling)
+let pending = new Map();      // idx -> value awaiting send (throttled)
+let sendTimer = null;
+
+const api = async (path) => { const r = await fetch(path, {cache: "no-store"}); if (!r.ok) throw new Error(path); return r.json(); };
+const clamp01 = (x) => Math.min(1, Math.max(0, x));
+function argb(h) { // "aarrggbb" or "0" -> css colour
+  if (!h || h === "0") return "transparent";
+  if (h.length === 8) return `rgba(${parseInt(h.substr(2,2),16)},${parseInt(h.substr(4,2),16)},${parseInt(h.substr(6,2),16)},${(parseInt(h.substr(0,2),16)/255).toFixed(3)})`;
+  return "#" + h;
+}
+
+// ---------------------------------------------------------------- parameter I/O
+function setParam(i, v, send = true) {
+  v = clamp01(v);
+  V[i] = v;
+  if (send) { pending.set(i, v); if (!sendTimer) sendTimer = setTimeout(flush, 30); }
+  refresh([i]);
+}
+function flush() {
+  sendTimer = null;
+  for (const [i, v] of pending) fetch(`/api/set?i=${i}&v=${v.toFixed(5)}`).catch(() => {});
+  pending.clear();
+}
+function stepOf(i) { const n = P[i].choices.length; return n > 1 ? 1 / (n - 1) : 0.01; }
+function nudge(i, dir) { setParam(i, Math.round((V[i] + dir * stepOf(i)) / stepOf(i)) * stepOf(i)); }
+
+function refresh(changed) {
+  for (const b of bindings) if (!changed || b.params.some((p) => changed.includes(p))) b.update();
+}
+
+async function poll() {
+  try {
+    const s = await api("/api/state");
+    const changed = [];
+    for (let i = 0; i < s.v.length; i++) {
+      if (dragging.has(i) || pending.has(i)) continue;
+      if (V[i] !== s.v[i] || D[i] !== s.d[i]) { V[i] = s.v[i]; D[i] = s.d[i]; changed.push(i); }
+    }
+    if (s.program !== undefined && $("prog").value !== String(s.program) && document.activeElement !== $("prog")) $("prog").value = s.program;
+    if (changed.length) { refresh(changed); updateGeneric(changed); }
+    $("status").textContent = "live"; $("status").className = "";
+  } catch (e) { $("status").textContent = "plugin not reachable (is the track still there?)"; $("status").className = "err"; }
+  setTimeout(poll, 100);
+}
+
+// display text for a parameter: ask the plugin after a local change (server value follows on next poll)
+function disp(i) { return D[i] === undefined ? "" : D[i]; }
+
+// ---------------------------------------------------------------- dragging helper
+function drag(el, idxs, onMove, onStart) {
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    el.setPointerCapture(e.pointerId);
+    idxs.forEach((i) => dragging.add(i));
+    const sx = e.clientX, sy = e.clientY, scale = curScale();
+    const start = onStart ? onStart(e) : null;
+    const mv = (ev) => onMove((ev.clientX - sx) / scale, (ev.clientY - sy) / scale, ev, start);
+    const up = () => { el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", up);
+                       idxs.forEach((i) => dragging.delete(i)); };
+    el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up); el.addEventListener("pointercancel", up);
+    e.preventDefault();
+  });
+}
+function curScale() { return parseFloat(stage.dataset.scale || "1"); }
+
+// ---------------------------------------------------------------- skin rendering
+const localDefs = {};
+function paramIdx(handle, remap) {
+  if (remap && remap[handle] !== undefined) handle = remap[handle];
+  const m = /^Parameter (\d+)$/.exec(handle || "");
+  return m ? parseInt(m[1], 10) : -1;
+}
+function parseBounds(s) { const a = s.split(/\s+/).map(Number); return {x: a[0], y: a[1], w: a[2], h: a[3]}; }
+
+function visibleRule(entry, remap) { // IndexedEnabling/<k>/<n>/Parameter <p>
+  const hs = entry.bounds.additionalInvalidatingHandles || [];
+  const rules = [];
+  for (const h of hs) {
+    const m = /^IndexedEnabling\/(\d+)\/(\d+)\/(.+)$/.exec(h);
+    if (m) rules.push({k: +m[1], n: +m[2], p: paramIdx(m[3], remap)});
+  }
+  return rules;
+}
+
+function build(entries, parent, remapIn) {
+  for (const e of entries) {
+    const type = e.componentData.type, data = e.componentData.data;
+    const b = parseBounds(e.bounds.bounds);
+    const remap = Object.assign({}, remapIn);
+    for (const m of (e["handle remapping"] || {}).map || []) {
+      // remap values may themselves refer to an outer "Data"
+      remap[m.key] = remapIn && remapIn[m.value] !== undefined ? remapIn[m.value] : m.value;
+    }
+    const div = document.createElement("div");
+    div.className = "c";
+    div.style.cssText += `left:${b.x}px;top:${b.y}px;width:${b.w}px;height:${b.h}px;`;
+    div.title = e.componentData.name || "";
+    const rules = visibleRule(e, remap);
+    if (rules.length) bindings.push({params: rules.map((r) => r.p), update() {
+      div.style.display = rules.every((r) => Math.round(V[r.p] * (r.n - 1)) === r.k) ? "" : "none"; }});
+    parent.appendChild(div);
+
+    if (type === "Focus") { div.remove(); continue; }
+    if (localDefs[type]) { build(localDefs[type].componentsData, div, remap); continue; }
+    const make = {Image, Knob, Label, Slider, Button, XYPad, Envelope}[type];
+    if (make) make(div, data, b, remap); else div.remove();
+  }
+}
+
+function Image(div, d) {
+  if (!d.image) { div.style.background = argb(d.colour); return; }
+  const im = document.createElement("img"); im.src = "/skin/" + d.image; div.appendChild(im);
+}
+
+function Label(div, d, b, remap) {
+  const i = paramIdx(d.handleName, remap), t = d.textStyle;
+  div.className += " lbl";
+  div.style.fontSize = t.font.height + "px";
+  div.style.color = argb(t.colour);
+  div.style.fontWeight = /Bold|SemiBold/.test(t.font.style) ? 600 : 400;
+  div.style.justifyContent = /left/i.test(t.justification) ? "flex-start" : /right/i.test(t.justification) ? "flex-end" : "center";
+  div.style.alignItems = "center";
+  if (d.type !== "Value" && d.type !== undefined && d.text) { div.textContent = d.text; return; }
+  bindings.push({params: [i], update() { div.textContent = i >= 0 ? disp(i) : ""; }});
+}
+
+function Knob(div, d, b, remap) {
+  const i = paramIdx(d.handleName, remap);
+  if (i < 0) return;
+  if (d.knobType === "ValueSlider") {          // text box: drag sideways, or click the left/right ends
+    div.className += " sel lbl";
+    const t = d.textStyle;
+    div.style.fontSize = t.font.height + "px"; div.style.color = argb(t.colour); div.style.justifyContent = "center"; div.style.alignItems = "center";
+    div.style.pointerEvents = "auto"; div.style.border = "1px solid #3a2e33"; div.style.borderRadius = "6px"; div.style.background = "#1c171a";
+    bindings.push({params: [i], update() { div.textContent = disp(i); }});
+    div.addEventListener("pointerdown", (e) => {
+      const r = div.getBoundingClientRect(), x = (e.clientX - r.left) / r.width;
+      if (x < 0.25) { nudge(i, -1); e.stopPropagation(); }
+      else if (x > 0.75) { nudge(i, +1); e.stopPropagation(); }
+    });
+    drag(div, [i], (dx, dy, ev, s) => { const n = P[i].choices.length;
+      const per = n > 1 ? 30 : 200;     // px per choice step, or per full range
+      setParam(i, n > 1 ? Math.round((s.v + dx / per * stepOf(i)) / stepOf(i)) * stepOf(i) : s.v + dx / per); },
+      () => ({v: V[i]}));
+    div.addEventListener("wheel", (e) => { e.preventDefault(); nudge(i, e.deltaY < 0 ? 1 : -1); }, {passive: false});
+    return;
+  }
+  div.classList.add("kn");
+  const set = (v, send) => setParam(i, v, send);
+  if (d.knobType === "FilmStrip") {
+    const im = document.createElement("img"); im.src = "/skin/" + d.filmStrip;
+    im.style.cssText = `width:${b.w}px;height:auto;position:relative;`;
+    div.style.overflow = "hidden"; div.appendChild(im);
+    const n = d.numFrames || 64;
+    bindings.push({params: [i], update() {
+      const fr = Math.round((d.invert ? 1 - V[i] : V[i]) * (n - 1));
+      im.style.top = (-fr * b.w) + "px"; }});
+    im.onload = () => { const fh = im.naturalHeight / n * (b.w / im.naturalWidth); div.style.height = fh + "px";
+                        im.style.top = "0"; };
+  } else {                                      // GenericNoLabel / others: draw an arc
+    const S = Math.min(b.w, b.h);
+    const svg = `<svg width="${b.w}" height="${b.h}" viewBox="0 0 ${b.w} ${b.h}"><path class="t" fill="none" stroke="#342024" stroke-width="5" stroke-linecap="round"/><path class="v" fill="none" stroke="#d62834" stroke-width="5" stroke-linecap="round"/><line class="n" stroke="#e0d4d4" stroke-width="3" stroke-linecap="round"/></svg>`;
+    div.innerHTML = svg;
+    const cx = b.w / 2, cy = b.h / 2, r = S / 2 - 6, a0 = 0.75 * Math.PI, a1 = 2.25 * Math.PI;
+    const pt = (a, rr) => [cx + rr * Math.cos(a), cy + rr * Math.sin(a)];
+    const arc = (from, to) => { const [x0, y0] = pt(from, r), [x1, y1] = pt(to, r); return `M${x0} ${y0} A${r} ${r} 0 ${to - from > Math.PI ? 1 : 0} 1 ${x1} ${y1}`; };
+    div.querySelector(".t").setAttribute("d", arc(a0, a1));
+    bindings.push({params: [i], update() {
+      const a = a0 + (a1 - a0) * V[i];
+      div.querySelector(".v").setAttribute("d", V[i] > 0.002 ? arc(a0, a) : "");
+      const [x0, y0] = pt(a, r * 0.35), [x1, y1] = pt(a, r * 0.85);
+      const n = div.querySelector(".n"); n.setAttribute("x1", x0); n.setAttribute("y1", y0); n.setAttribute("x2", x1); n.setAttribute("y2", y1); }});
+  }
+  drag(div, [i], (dx, dy, ev, s) => set(s.v - dy / (ev.shiftKey ? 800 : 200)), () => ({v: V[i]}));
+  div.addEventListener("dblclick", () => set(P[i].def));
+  div.addEventListener("wheel", (e) => { e.preventDefault(); set(V[i] - Math.sign(e.deltaY) * 0.01); }, {passive: false});
+}
+
+function Slider(div, d, b, remap) {
+  const i = paramIdx(d.handleName, remap);
+  if (i < 0) return;
+  div.classList.add("fd");
+  const vert = d.direction !== "Horizontal";
+  const fill = document.createElement("img"), cap = document.createElement("img");
+  if (d.revealedImage) { fill.src = "/skin/" + d.revealedImage; fill.style.position = "absolute"; fill.style.left = "0"; fill.style.bottom = "0"; div.appendChild(fill); }
+  cap.src = "/skin/" + d.thumbImage; cap.style.position = "absolute"; div.appendChild(cap);
+  const capH = () => cap.naturalHeight || 22, capW = () => cap.naturalWidth || 44;
+  bindings.push({params: [i], update() {
+    const v = V[i];
+    if (vert) {
+      const ty = (1 - v) * (b.h - capH());
+      cap.style.left = ((b.w - capW()) / 2) + "px"; cap.style.top = ty + "px";
+      if (d.revealedImage) { fill.style.clipPath = `inset(${ty + capH() / 2}px 0 0 0)`; }
+    } else { cap.style.top = ((b.h - capH()) / 2) + "px"; cap.style.left = v * (b.w - capW()) + "px"; }
+  }});
+  cap.onload = () => refresh([i]);
+  const val = (e) => { const r = div.getBoundingClientRect(), s = curScale();
+    return vert ? 1 - ((e.clientY - r.top) / s - capH() / 2) / (b.h - capH()) : ((e.clientX - r.left) / s - capW() / 2) / (b.w - capW()); };
+  drag(div, [i], (dx, dy, ev) => setParam(i, val(ev)), (e) => { setParam(i, val(e)); });
+}
+
+function Button(div, d, b, remap) {
+  const i = paramIdx(d.handleName, remap);
+  if (i < 0) return;
+  div.classList.add("btn");
+  const on = document.createElement("img"), off = document.createElement("img");
+  on.src = "/skin/" + d.onImage; off.src = "/skin/" + d.offImage;
+  div.appendChild(off); div.appendChild(on);
+  const n = d.numButtonsInGroup || 1, id = d.buttonId || 0;
+  const isOn = () => (n <= 1 ? V[i] >= 0.5 : Math.round(V[i] * (n - 1)) === id);
+  bindings.push({params: [i], update() { const o = isOn(); on.style.display = o ? "" : "none"; off.style.display = o ? "none" : ""; }});
+  div.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    if (n <= 1) setParam(i, V[i] >= 0.5 ? 0 : 1); else setParam(i, id / (n - 1));
+  });
+}
+
+function XYPad(div, d, b, remap) {
+  const xi = paramIdx(d.xPositionHandle, remap), yi = paramIdx(d.yPositionHandle, remap);
+  div.classList.add("xy");
+  div.style.background = "rgba(255,255,255,0.03)";
+  const puck = document.createElement("img"); puck.src = "/skin/" + d.image; puck.style.position = "absolute"; div.appendChild(puck);
+  const pw = () => puck.naturalWidth || 36, ph = () => puck.naturalHeight || 36;
+  bindings.push({params: [xi, yi], update() {
+    puck.style.left = (V[xi] * b.w - pw() / 2) + "px"; puck.style.top = ((1 - V[yi]) * b.h - ph() / 2) + "px"; }});
+  puck.onload = () => refresh([xi, yi]);
+  const at = (e) => { const r = div.getBoundingClientRect(), s = curScale();
+    setParam(xi, (e.clientX - r.left) / s / b.w); setParam(yi, 1 - (e.clientY - r.top) / s / b.h); };
+  drag(div, [xi, yi], (dx, dy, ev) => at(ev), (e) => at(e));
+}
+
+function Envelope(div, d, b, remap) {
+  const A = paramIdx(d.attackHandle, remap), Dc = paramIdx(d.decayHandle, remap), S = paramIdx(d.sustainHandle, remap), R = paramIdx(d.releaseHandle, remap);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", b.w); svg.setAttribute("height", b.h);
+  svg.style.cssText = "position:absolute;left:0;top:0;background:" + argb(d.backgroundColour) + ";touch-action:none;";
+  div.appendChild(svg);
+  const pad = 22, W = b.w - 2 * pad, H = b.h - 2 * pad, q = W / 4;
+  const grid = document.createElementNS(ns, "path");
+  grid.setAttribute("stroke", argb(d.scaleColour)); grid.setAttribute("fill", "none");
+  let gd = ""; for (let k = 0; k <= 4; k++) gd += `M${pad + k * q} ${pad}V${pad + H}`; for (let k = 0; k <= 4; k++) gd += `M${pad} ${pad + k * H / 4}H${pad + W}`;
+  grid.setAttribute("d", gd); svg.appendChild(grid);
+  const area = document.createElementNS(ns, "path"), line = document.createElementNS(ns, "path");
+  area.setAttribute("fill", argb(d.fillColour)); line.setAttribute("fill", "none"); line.setAttribute("stroke", argb(d.lineColour));
+  line.setAttribute("stroke-width", d.lineWidth || 3); line.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(area); svg.appendChild(line);
+  const handles = [];
+  for (const nm of ["A", "D", "S", "R"]) {
+    const c = document.createElementNS(ns, "circle");
+    c.setAttribute("r", 10); c.setAttribute("fill", argb(d.handleFillColour)); c.setAttribute("stroke", argb(d.handleLineColour)); c.setAttribute("stroke-width", 2);
+    c.style.cursor = "pointer"; svg.appendChild(c); handles.push(c);
+  }
+  const pos = () => {
+    const xa = pad + V[A] * q, xd = xa + V[Dc] * q, xs = xd + q, xr = xs + V[R] * q;
+    const ys = pad + (1 - V[S]) * H, y0 = pad + H;
+    return {xa, xd, xs, xr, ys, y0};
+  };
+  bindings.push({params: [A, Dc, S, R], update() {
+    const p = pos();
+    const path = `M${pad} ${p.y0}L${p.xa} ${pad}L${p.xd} ${p.ys}L${p.xs} ${p.ys}L${p.xr} ${p.y0}`;
+    line.setAttribute("d", path); area.setAttribute("d", path + "Z");
+    [[p.xa, pad], [p.xd, p.ys], [p.xs, p.ys], [p.xr, p.y0]].forEach(([x, y], k) => { handles[k].setAttribute("cx", x); handles[k].setAttribute("cy", y); });
+  }});
+  // handle 0 = attack (x), 1 = decay (x) + sustain (y), 2 = sustain (y), 3 = release (x)
+  const hook = (c, idxs, fn) => drag(c, idxs, (dx, dy, ev) => {
+    const r = svg.getBoundingClientRect(), s = curScale();
+    fn((ev.clientX - r.left) / s - pad, (ev.clientY - r.top) / s - pad); });
+  hook(handles[0], [A], (x) => setParam(A, x / q));
+  hook(handles[1], [Dc, S], (x, y) => { setParam(Dc, (x - V[A] * q) / q); setParam(S, 1 - y / H); });
+  hook(handles[2], [S], (x, y) => setParam(S, 1 - y / H));
+  hook(handles[3], [R], (x) => setParam(R, (x - (V[A] + V[Dc] + 1) * q) / q));
+}
+
+// ---------------------------------------------------------------- tabs / generic list
+function showTab(k) {
+  activeTab = k;
+  document.querySelectorAll("button.tab").forEach((b, n) => b.classList.toggle("on", n === k));
+  stage.innerHTML = ""; bindings = [];
+  const t = skin.pageData.tabs[k];
+  const cd = t.componentDefinition;
+  const first = cd.componentsData.find((c) => c.componentData.type === "Image");
+  const fb = first ? parseBounds(first.bounds.bounds) : {w: 1280, h: 628};
+  stage.style.width = fb.w + "px"; stage.style.height = fb.h + "px";
+  stage.dataset.sw = fb.w; stage.dataset.sh = fb.h;
+  stage.style.background = argb((cd.backgroundData && cd.backgroundData.unfocussed.colour) || "ff161617");
+  build(cd.componentsData, stage, {});
+  refresh(); fit();
+}
+function fit() {
+  if (!stage.dataset.sw) return;
+  const avail = $("wrap").clientWidth - 24;
+  const s = Math.min(1.6, avail / +stage.dataset.sw);
+  stage.dataset.scale = s; stage.style.transform = `scale(${s})`;
+  $("wrap").style.height = (+stage.dataset.sh * s + 24) + "px";
+}
+window.addEventListener("resize", fit);
+
+const genericRows = [];
+function buildGeneric() {
+  const g = $("generic"); g.hidden = false; stage.hidden = true;
+  P.forEach((p, i) => {
+    const n = document.createElement("div"); n.textContent = p.name;
+    const r = document.createElement("input"); r.type = "range"; r.min = 0; r.max = 1; r.step = p.choices.length > 1 ? 1 / (p.choices.length - 1) : 0.001;
+    r.value = V[i] || 0;
+    r.oninput = () => { V[i] = +r.value; dragging.add(i); pending.set(i, V[i]); if (!sendTimer) sendTimer = setTimeout(flush, 30); setTimeout(() => dragging.delete(i), 200); };
+    const dd = document.createElement("div"); dd.className = "d";
+    g.append(n, r, dd); genericRows[i] = {r, dd};
+  });
+}
+function updateGeneric(changed) {
+  for (const i of changed) if (genericRows[i]) { genericRows[i].r.value = V[i]; genericRows[i].dd.textContent = D[i] + (P[i].unit ? " " + P[i].unit : ""); }
+}
+
+// ---------------------------------------------------------------- start
+(async function init() {
+  try {
+    const info = await api("/api/params");
+    P = info.params;
+    $("title").textContent = info.name;
+    document.title = info.name + " panel";
+    info.programs.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = (k + 1) + ". " + n; $("prog").appendChild(o); });
+    $("prog").onchange = () => fetch("/api/program?n=" + $("prog").value).catch(() => {});
+    const s = await api("/api/state"); V = s.v; D = s.d; $("prog").value = s.program;
+    try {
+      const r = await fetch("/skin/TUI.json", {cache: "no-store"});
+      if (!r.ok) throw 0;
+      skin = await r.json();
+    } catch (e) { skin = null; }
+    if (skin) {
+      for (const l of skin.pageData.componentDefinitions.localComponentDefinitions) localDefs[l.key] = l.value;
+      const tabs = skin.pageData.tabs;
+      tabs.forEach((t, k) => { const b = document.createElement("button"); b.className = "tab"; b.textContent = t.tabName; b.onclick = () => { showTab(k); history.replaceState(null, "", "#tab=" + k); }; $("tabs").appendChild(b); });
+      const m = /tab=(\d+)/.exec(location.hash), t0 = m ? Math.min(+m[1], tabs.length - 1) : 0;
+      showTab(t0);
+    } else { buildGeneric(); updateGeneric(V.map((_, i) => i)); }
+    poll();
+  } catch (e) { $("status").textContent = "cannot reach the plugin: " + e; $("status").className = "err"; }
+})();
+</script>
+</body>
+</html>

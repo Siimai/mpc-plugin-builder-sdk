@@ -434,6 +434,12 @@ class Builder:
             shutil.rmtree(base)
         flags = self.common_flags()
         content_dst = None
+        # Dev-only browser control panel (framework/mpc_desktop_panel.h). Never part of the MPC builds.
+        panel = not IS_WINDOWS and "MPC_NO_PANEL" not in (self.args.define or [])
+        if panel:
+            flags.append("-DMPC_DESKTOP_PANEL")
+            if not IS_MAC:
+                flags.append("-pthread")
 
         if IS_MAC:
             bundle = os.path.join(base, name + ".vst")
@@ -486,7 +492,30 @@ class Builder:
         n = copy_content(self.project, content_dst)
         if n:
             log("  copied %d file%s from Content/" % (n, "" if n == 1 else "s"))
+        if panel:
+            self._copy_panel_files(content_dst)
         return result
+
+    def _copy_panel_files(self, dst):
+        """panel.html + Plugin Skins/ next to the desktop binary, for the browser control panel."""
+        os.makedirs(dst, exist_ok=True)
+        shutil.copyfile(os.path.join(FRAMEWORK_DIR, "desktop_panel.html"), os.path.join(dst, "panel.html"))
+        skins_dst = os.path.join(dst, "Plugin Skins")
+        candidates = [os.path.join(self.project, "skins")]
+        build_dir = os.path.join(self.project, "build")
+        if os.path.isdir(build_dir):
+            for d in sorted(os.listdir(build_dir)):
+                candidates.append(os.path.join(build_dir, d, "Plugin Skins"))
+        for src in candidates:
+            if os.path.isfile(os.path.join(src, "TUI.json")):
+                if os.path.isdir(skins_dst):
+                    shutil.rmtree(skins_dst)
+                shutil.copytree(src, skins_dst)
+                log("  panel: skin from %s" % os.path.relpath(src, self.project))
+                break
+        else:
+            log("  panel: no skin found (run a full build first for ui.json plugins); the panel will show a plain slider list")
+        log("  panel: open http://127.0.0.1:8765 in a browser while the plugin is loaded in your host")
 
     def compile_try(self, label, argv, output):
         """Like compile() but returns False instead of raising (compiler messages are shown at -v only)."""

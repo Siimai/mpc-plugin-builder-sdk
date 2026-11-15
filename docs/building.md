@@ -25,6 +25,7 @@ Options: `--target native|arm32|arm64|desktop|all`, `--debug`, `--no-ui`, `--no-
 - **Windows**: `build/desktop/<Name>/<slug>.dll` (64-bit) with `plugin.json` and `Content/` beside it. Copy the whole folder into the host's VST2 folder.
 - **Linux**: `build/desktop/<Name>/<slug>.so`, same layout; copy it to `~/.vst`.
 - `Content/` goes with the plugin (inside the bundle's `Contents/Resources` on macOS), and `mpc_resources.h` finds it there.
+- **Browser control panel (desktop build only, dev aid):** while the plugin is loaded in your host, open `http://127.0.0.1:8765` (next instances: 8766, ...). It draws the plugin's `Plugin Skins/TUI.json` (the MPC skin: knobs, faders, buttons, XY pad, envelopes, program list) as a clickable page, or a plain slider list if there is no skin. Moves are not recorded as host automation. Compiled in by `--target desktop` only (`framework/mpc_desktop_panel.h`, `framework/desktop_panel.html`); the MPC builds never contain it. Build with `--define MPC_NO_PANEL` to leave it out. For `ui.json` plugins run a full build once first so a generated skin exists to copy.
 - The desktop build is for a quick listen and for hosts like Reaper; many current hosts have dropped VST2, so check yours. The Windows and Linux outputs are cross-compile-checked only; the macOS bundle has been run through `host_sim`.
 
 ## Toolchain: zig (default, recommended)

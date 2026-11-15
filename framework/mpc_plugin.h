@@ -34,6 +34,23 @@
 #include <string>
 #include <vector>
 
+#if defined(MPC_DESKTOP_PANEL) && !defined(_WIN32)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+#endif
+
 #if defined(_WIN32)
   #define MPC_EXPORT __declspec(dllexport)
 #else
@@ -409,6 +426,7 @@ public:
 
     // ----- glue, used by the dispatcher below (do not call yourself) -------
     AEffect* effect_ = nullptr;
+    void* panel_ = nullptr;   // desktop-build browser panel (mpc_desktop_panel.h); null in MPC builds
     audioMasterCallback host_ = nullptr;
 
     void internalSetSampleRate(double sr) { sampleRate_ = sr; prepared_ = false; }
@@ -645,6 +663,8 @@ protected:
 // ---------------------------------------------------------------------------
 // The VST2 dispatcher: translates host opcodes into calls on your Plugin.
 // ---------------------------------------------------------------------------
+#include "mpc_desktop_panel.h"   // empty unless MPC_DESKTOP_PANEL is defined (desktop builds only)
+
 namespace detail {
 
 inline Plugin* self(AEffect* e) { return static_cast<Plugin*>(e->object); }
@@ -660,6 +680,9 @@ inline VstIntPtr dispatcher(AEffect* e, VstInt32 opcode, VstInt32 index, VstIntP
     {
         case effOpen: return 0;
         case effClose:
+#if defined(MPC_DESKTOP_PANEL) && !defined(_WIN32)
+            panelStop(p->panel_);   // stop the panel thread before the plugin is destroyed
+#endif
             delete p;
             e->object = nullptr;
             std::free(e);
@@ -814,6 +837,9 @@ inline AEffect* createEffect(Plugin* plugin, audioMasterCallback host)
     e->processDoubleReplacing = nullptr;
     plugin->effect_ = e;
     plugin->host_ = host;
+#if defined(MPC_DESKTOP_PANEL) && !defined(_WIN32)
+    panelStart(plugin, plugin->panel_);
+#endif
     return e;
 }
 
