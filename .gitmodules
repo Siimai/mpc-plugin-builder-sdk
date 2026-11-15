@@ -1,0 +1,6 @@
+[submodule "plugins/Ommi Amp"]
+	path = plugins/Ommi Amp
+	url = https://github.com/Siimai/mpc-plugin-ommi-amp.git
+[submodule "plugins/Ommi EQ"]
+	path = plugins/Ommi EQ
+	url = https://github.com/Siimai/mpc-plugin-ommi-eq.git

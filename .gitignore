@@ -8,6 +8,9 @@ dist/
 # Users' own plugin projects live here; the SDK repo only tracks the placeholder
 plugins/*
 !plugins/.gitkeep
+# Plugin projects that live in their own repositories and are tracked here as git submodules
+!plugins/Ommi Amp
+!plugins/Ommi EQ
 
 # Python
 __pycache__/
