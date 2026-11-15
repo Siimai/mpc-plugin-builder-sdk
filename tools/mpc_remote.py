@@ -6,6 +6,11 @@ Usage:
 
 The MPC's address can also be given as --address ADDRESS (or the MPC_ADDRESS environment variable).
 
+Saved settings: `mpc_remote.py 192.168.1.50 --drive 3 save` writes the address, drive (and --user / --port when
+changed) to .mpc-device.json in the SDK folder (git-ignored; MPC_CONFIG names another file). Later runs then need no
+address or --drive. Order of precedence: command line, environment (MPC_ADDRESS / MPC_HOST), saved file, defaults.
+A password is never saved; use MPC_SSH_PASSWORD.
+
     mpc_remote.py 192.168.1.50                       interactive menu
     mpc_remote.py 192.168.1.50 info                  show the device and its drives
     mpc_remote.py 192.168.1.50 list
@@ -17,6 +22,7 @@ The MPC's address can also be given as --address ADDRESS (or the MPC_ADDRESS env
     mpc_remote.py 192.168.1.50 export --all --out ~/Backups        always written as zip files
     mpc_remote.py 192.168.1.50 doctor                check the MPC is set up correctly
     mpc_remote.py 192.168.1.50 restart               restart the MPC app to rescan VSTs (unsaved data is lost)
+    mpc_remote.py 192.168.1.50 --drive 3 save        remember this address and drive for next time (no connection made)
 
 Options:
     --password PW   SSH password if the MPC needs one (or set MPC_SSH_PASSWORD; avoids showing it in `ps`)
@@ -68,7 +74,55 @@ JUNK_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 MPC_SERVICE = "acvs"  # the systemd unit that runs the MPC application
 
 EXIT_OK, EXIT_FAIL, EXIT_SETUP = 0, 1, 2
-COMMANDS = ("info", "drives", "list", "doctor", "restart", "add", "update", "import", "remove", "export")
+COMMANDS = ("info", "drives", "list", "doctor", "restart", "add", "update", "import", "remove", "export", "save")
+
+# Saved device settings (address, drive, user, port). Never a password.
+CONFIG_KEYS = ("address", "drive", "user", "port")
+
+
+def config_path():
+    return os.environ.get("MPC_CONFIG") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".mpc-device.json")
+
+
+def load_config():
+    """Return (settings dict, path or None). A missing or broken file is ignored (a broken one with a warning)."""
+    path = config_path()
+    if not os.path.isfile(path):
+        return {}, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("not a JSON object")
+    except (OSError, ValueError) as e:
+        sys.stderr.write("  warning: ignoring %s (%s)\n" % (path, e))
+        return {}, None
+    if "password" in raw:
+        sys.stderr.write("  warning: %s has a password; passwords are never read from it (use MPC_SSH_PASSWORD)\n" % path)
+    cfg = {k: raw[k] for k in CONFIG_KEYS if raw.get(k) not in (None, "")}
+    if "drive" in cfg:
+        cfg["drive"] = str(cfg["drive"])
+    if "port" in cfg:
+        try:
+            cfg["port"] = int(cfg["port"])
+        except (TypeError, ValueError):
+            del cfg["port"]
+    return cfg, path
+
+
+def save_config(host, drive, user, port):
+    path = config_path()
+    data = {"address": host}
+    if drive:
+        data["drive"] = str(drive)
+    if user and user != "root":
+        data["user"] = user
+    if port and port != 22:
+        data["port"] = port
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    return path, data
 
 # ----------------------------------------------------------------------------------------------
 # Terminal styling
@@ -1625,20 +1679,21 @@ def menu(ctx, drives):
 # Main
 # ----------------------------------------------------------------------------------------------
 
-def build_parser():
+def build_parser(cfg=None):
+    cfg = cfg or {}
     common = argparse.ArgumentParser(add_help=False)  # same options accepted after the command too
     p = argparse.ArgumentParser(prog="mpc_remote.py", description="Manage VST2 plugins on an Akai MPC over the network.",
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog="Run with just an address for an interactive menu.")
     p.add_argument("--address", "--host", dest="address", metavar="ADDRESS",
-                   default=os.environ.get("MPC_ADDRESS") or os.environ.get("MPC_HOST"),
+                   default=os.environ.get("MPC_ADDRESS") or os.environ.get("MPC_HOST") or cfg.get("address"),
                    help="IP address or name of the MPC; normally given as the first argument (or set MPC_ADDRESS)")
     for target, default in ((p, True), (common, False)):
         d = (lambda v: v) if default else (lambda v: argparse.SUPPRESS)
         target.add_argument("--password", default=d(None), help="SSH password if needed (or set MPC_SSH_PASSWORD)")
-        target.add_argument("--user", default=d("root"), help="SSH user (default root)")
-        target.add_argument("--port", type=int, default=d(22), help="SSH port (default 22)")
-        target.add_argument("--drive", default=d(None), help="drive number, name or mount point to manage")
+        target.add_argument("--user", default=d(cfg.get("user", "root")), help="SSH user (default root)")
+        target.add_argument("--port", type=int, default=d(cfg.get("port", 22)), help="SSH port (default 22)")
+        target.add_argument("--drive", default=d(cfg.get("drive")), help="drive number, name or mount point to manage (saved default: see `save`)")
         target.add_argument("--yes", "-y", action="store_true", default=d(False), help="do not ask for confirmation")
         target.add_argument("--no-color", action="store_true", default=d(False), help="plain output")
     sub = p.add_subparsers(dest="command")
@@ -1647,6 +1702,7 @@ def build_parser():
     sub.add_parser("list", parents=[common], help="list installed plugins")
     sub.add_parser("doctor", parents=[common], help="check the MPC is set up correctly")
     sub.add_parser("restart", parents=[common], help="restart the MPC app so it rescans VST2 plugins (unsaved data is lost)")
+    sub.add_parser("save", parents=[common], help="remember the address, drive, user and port in .mpc-device.json (no password)")
     a = sub.add_parser("add", parents=[common], help="install plugins from zip files or SDK project folders")
     a.add_argument("sources", nargs="*")
     u = sub.add_parser("update", parents=[common], help="install, replacing any existing copy without asking")
@@ -1672,13 +1728,26 @@ def main(argv=None):
     host_arg = None
     if argv and not argv[0].startswith("-") and argv[0] not in COMMANDS:
         host_arg = argv.pop(0)  # `mpc_remote.py 192.168.1.50 list`: argparse cannot take an optional positional before subcommands
-    args = build_parser().parse_args(argv)
+    cfg, cfg_path = load_config()
+    args = build_parser(cfg).parse_args(argv)
     _enable_vt()
     color = sys.stdout.isatty() and not args.no_color and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
     S = Style(color)
 
     banner()
     host = host_arg or args.address
+    if cfg_path and cfg and not args.command == "save":
+        used = [k for k in CONFIG_KEYS if k in cfg]
+        say("  %s %s" % (S.dim("Saved settings:"), S.dim("%s (%s); command-line options override them" % (os.path.basename(cfg_path), ", ".join(used)))))
+        say()
+    if args.command == "save":
+        if not host:
+            say("  %s %s" % (S.badc(S.bad), "Give the MPC's address to save, e.g.  mpc_remote.py mpc-live-ii.lan --drive 3 save"))
+            return EXIT_USAGE_ERR
+        path, data = save_config(host, args.drive, args.user, args.port)
+        say("  %s Saved %s to %s" % (S.good(S.ok), ", ".join("%s=%s" % kv for kv in data.items()), S.bold(path)))
+        say("  " + S.dim("Later runs need no address or --drive. No password is stored; use MPC_SSH_PASSWORD if one is needed."))
+        return EXIT_OK
     if not host:
         if not interactive():
             say("  %s %s" % (S.badc(S.bad), "Give the MPC's IP address as the first argument."))

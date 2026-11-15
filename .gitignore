@@ -19,3 +19,6 @@ __pycache__/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Saved MPC device settings (address, drive) for tools/mpc_remote.py
+.mpc-device.json

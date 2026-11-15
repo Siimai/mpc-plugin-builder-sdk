@@ -20,6 +20,8 @@ Developer mode is an official, supported switch, but it opens a login on the dev
 
 ## Ask for what you need
 
+**First look for saved settings.** If `.mpc-device.json` exists in the SDK folder (git-ignored), the tool reads the MPC's address, drive, user and port from it, so you can run `python3 tools/mpc_remote.py update plugins/<Name> --yes --no-color` with no address and no `--drive`; do not ask the user for what the file already holds. Command-line options and `MPC_ADDRESS` override it. After the user gives you the address and chooses a drive for the first time, offer to save them: `python3 tools/mpc_remote.py <address> --drive <d> save` (it makes no connection and never stores a password).
+
 - The MPC's **IP address** (ask if not given). A password is only needed if the user has set one; do not guess passwords and do not put one in files. If one is needed pass it with the `MPC_SSH_PASSWORD` environment variable (preferred) or `--password`.
 - Which drive, if several are mounted (the script lists them; `--drive` takes the number, name or mount point). Units with an internal NVMe drive list it too (plugins go in `/nvme/VST2 Plugins`). Removable drives may be mounted `noexec`; the script warns, and the internal drive is the fallback.
 
