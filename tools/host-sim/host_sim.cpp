@@ -1317,6 +1317,51 @@ static int runTest(const std::string& path, const TestOptions& opt)
         }
     }
 
+    // ---- program changes: parameters follow, and the host is told ----------------
+    if (e->numPrograms > 1)
+    {
+        rep.section("Check: program changes (built-in presets)");
+        setPhase("program changes");
+        disp(e, effSetProgram, 0, 0);
+        std::vector<float> prev((size_t)numParams);
+        for (int i = 0; i < numParams; ++i) prev[(size_t)i] = getParam(e, i);
+        int changedProgs = 0, silent = 0, wrongIndex = 0;
+        for (int pi = 1; pi < e->numPrograms; ++pi)
+        {
+            long a0 = g.automateCalls, u0 = g.updateDisplayCalls;
+            disp(e, effSetProgram, 0, pi);
+            long told = (g.automateCalls - a0) + (g.updateDisplayCalls - u0);
+            if ((int)disp(e, effGetProgram) != pi) ++wrongIndex;
+            bool changed = false;
+            for (int i = 0; i < numParams; ++i)
+            {
+                float now = getParam(e, i);
+                if (std::fabs(now - prev[(size_t)i]) > 1e-4f) changed = true;
+                prev[(size_t)i] = now;
+            }
+            if (changed)
+            {
+                ++changedProgs;
+                if (told == 0) ++silent;
+            }
+        }
+        if (wrongIndex) rep.fail("effGetProgram does not return the program that effSetProgram selected (%d mismatch(es))", wrongIndex);
+        if (changedProgs == 0)
+            rep.warn("selecting programs never changed any parameter value; if the plugin has presets, check addProgram() values");
+        else
+        {
+            rep.pass("selecting a program changes the parameter values (%d of %d program switches changed something)",
+                     changedProgs, e->numPrograms - 1);
+            if (silent)
+                rep.warn("%d program switch(es) changed parameter values without telling the host (no audioMasterAutomate / "
+                         "audioMasterUpdateDisplay); the MPC's knobs and sliders may keep showing the old values. "
+                         "Call notifyHostParameterChanged() / requestDisplayUpdate() after changing parameters yourself.", silent);
+            else
+                rep.pass("the host was notified about every program change that moved parameters");
+        }
+        disp(e, effSetProgram, 0, 0);
+    }
+
     // ---- (7) in-place processing (JUCE hosts pass the same buffers) ----------
     restoreDefaults();
     if (!instrument && e->numInputs > 0)

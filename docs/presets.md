@@ -10,6 +10,8 @@ addProgram("Init",      { 0.5f, 1000.0f, 0.2f, 0 });
 addProgram("Deep Bass", { 0.9f,  220.0f, 0.6f, 1 });
 ```
 
+When a program is chosen, the framework also tells the host that every parameter moved (`audioMasterAutomate`) and asks it to refresh its display, so the MPC's knobs follow the preset. `host_sim` checks this ("program changes"); rebuild older plugins to pick it up.
+
 Order matters: values are matched to parameters by index. Changing parameters later means updating the lists; the framework ignores extra values and leaves missing ones alone.
 
 ## Preset files (.xpl), optional
