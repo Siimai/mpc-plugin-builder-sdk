@@ -11,6 +11,7 @@ plugins/*
 # Plugin projects that live in their own repositories and are tracked here as git submodules
 !plugins/Ommi Amp
 !plugins/Ommi EQ
+!plugins/Ommi Pedalboard
 
 # Python
 __pycache__/

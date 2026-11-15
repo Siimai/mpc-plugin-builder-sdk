@@ -4,3 +4,6 @@
 [submodule "plugins/Ommi EQ"]
 	path = plugins/Ommi EQ
 	url = https://github.com/Siimai/mpc-plugin-ommi-eq.git
+[submodule "plugins/Ommi Pedalboard"]
+	path = plugins/Ommi Pedalboard
+	url = https://github.com/Siimai/mpc-plugin-ommi-pedalboard.git
